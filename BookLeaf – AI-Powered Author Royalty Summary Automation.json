@@ -1,0 +1,775 @@
+{
+  "name": "BookLeaf – AI-Powered Author Royalty Summary Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "bookleaf/royalty-summary",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b77220f4-1e1f-4ee3-9345-df0bef7d8a32",
+      "name": "Webhook – Receive Request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        432
+      ],
+      "webhookId": "0276109d-7b9f-41d3-baf6-d8d790623b42",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "GuXljeAUxgWkLqw8",
+          "name": "Header Auth account"
+        }
+      },
+      "notes": "POST /bookleaf/royalty-summary. Authenticated with the X-BookLeaf-Secret header (Header Auth credential). Wrong or missing secret is rejected by n8n with 403 before the workflow runs."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "c1",
+              "name": "email_enabled",
+              "type": "boolean",
+              "value": false
+            },
+            {
+              "id": "c2",
+              "name": "email_test_recipient",
+              "type": "string",
+              "value": ""
+            },
+            {
+              "id": "c3",
+              "name": "email_from",
+              "type": "string",
+              "value": "BookLeaf Publishing <REPLACE_WITH_VERIFIED_SENDER>"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "bff6df2f-d00e-41ae-a4d3-e555928d6225",
+      "name": "Workflow Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        272,
+        560
+      ],
+      "notes": "Single place to configure BUBBLE_BASE_URL (Bubble Data API root, ending in /api/1.1) and BUBBLE_CALLBACK_URL (Bubble backend workflow endpoint). No secrets here: tokens live in n8n credentials."
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst headers = item.headers || {};\nconst body = item.body && typeof item.body === 'object' ? item.body : {};\nconst errors = [];\nconst ct = String(headers['content-type'] || '').toLowerCase();\nif (ct.indexOf('application/json') === -1) errors.push('Content-Type must be application/json');\nconst clean = (v) => (typeof v === 'string' ? v.trim() : '');\nconst num = (x) => { const n = Number(String(x === null || x === undefined ? '' : x).replace(/[^0-9.-]/g, '')); return isNaN(n) ? 0 : n; };\nconst author_id = clean(body.author_id);\nconst request_id = clean(body.request_id);\nconst triggered_by = clean(body.triggered_by);\nconst author_name = clean(body.author_name);\nconst author_email = clean(body.author_email);\nif (!author_id) errors.push('author_id is required');\nif (!request_id) errors.push('request_id is required');\nif (!triggered_by) errors.push('triggered_by is required');\nif (!author_name) errors.push('author_name is required');\nif (!author_email) errors.push('author_email is required');\nelse if (!/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(author_email)) errors.push('author_email is not a valid email address');\nconst books = [];\nconst raw = clean(body.books_summary);\nif (!raw) errors.push('books_summary is required');\nelse {\n  raw.split('##').forEach((rec) => {\n    const f = rec.split('||').map((s) => s.trim());\n    if (f.length < 8 || !f[0]) { if (errors.indexOf('books_summary has a malformed book entry') === -1) errors.push('books_summary has a malformed book entry'); return; }\n    books.push({ title: f[0], copies: num(f[1]), earned: num(f[2]), paid: num(f[3]), pending: num(f[4]), royalty_status: f[5], publication_status: f[6], last_payout: f[7] });\n  });\n}\nreturn [{ json: { valid: errors.length === 0, errors: errors, error_message: 'Invalid request: ' + errors.join('; '), request_id: request_id, author_id: author_id, triggered_by: triggered_by, author_name: author_name, author_email: author_email, environment: clean(body.environment) || 'development', books: books, bubble_totals: { earned: num(body.total_earned), paid: num(body.total_paid), pending: num(body.total_pending) }, bubble_royalty_status: clean(body.royalty_status), last_payout_date: clean(body.last_payout_date), received_at: new Date().toISOString() } }];"
+      },
+      "id": "2032867e-a629-44c4-b0d2-f844fabf2a21",
+      "name": "Validate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        496,
+        560
+      ],
+      "notes": "Checks JSON content type and that author_id, request_id and triggered_by are present. The secret header itself is verified by the Webhook node credential."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f9340157-eeca-485c-8594-ae4827066bf6",
+      "name": "Request Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        720,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $input.first().json;\nconst sd = $getWorkflowStaticData('global');\nsd.requests = sd.requests || {};\nsd.authors = sd.authors || {};\nconst now = Date.now();\nconst DAY = 86400000;\nconst LOCK = 10 * 60 * 1000;\nObject.keys(sd.requests).forEach((k) => { if (now - sd.requests[k].ts > 30 * DAY) delete sd.requests[k]; });\nObject.keys(sd.authors).forEach((k) => { if (now - sd.authors[k].ts > LOCK) delete sd.authors[k]; });\nconst prior = sd.requests[v.request_id];\nconst lock = sd.authors[v.author_id];\nlet duplicate = false;\nlet reason = '';\nif (prior && prior.status === 'success') { duplicate = true; reason = 'Request already completed successfully.'; }\nelse if (prior && prior.status === 'processing' && now - prior.ts < LOCK) { duplicate = true; reason = 'Request is already being processed.'; }\nelse if (lock && lock.request_id !== v.request_id) { duplicate = true; reason = 'Another summary for this author is already being processed.'; }\nif (!duplicate) {\n  sd.requests[v.request_id] = { status: 'processing', ts: now, author_id: v.author_id };\n  sd.authors[v.author_id] = { request_id: v.request_id, ts: now };\n}\nreturn [{ json: Object.assign({}, v, { is_duplicate: duplicate, duplicate_reason: reason }) }];"
+      },
+      "id": "cdd5bab7-5e1d-413a-8be8-0f5d671163bc",
+      "name": "Check Duplicate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        496
+      ],
+      "notes": "Persistent duplicate guard. A request is a duplicate if Bubble shows Success, or n8n static data (persists across production executions) shows it is Processing (under 30 min) or Success. Failed requests may be retried."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_duplicate }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "71503431-3487-4585-bd65-981e80ca5d85",
+      "name": "Is Duplicate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        1472,
+        496
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"Duplicate\", request_id: $json.request_id || \"\", summary: \"\", error_message: $json.duplicate_reason || \"Duplicate request\", email_status: \"not_attempted\", email_error: \"\", subject: \"\", email_to: \"\", totals_match: false, completed_at: $now.toISO() }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "6bc4f72b-498e-4848-9830-4344d3e3cfdf",
+      "name": "Respond – Duplicate Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1504,
+        272
+      ],
+      "notes": "No callback is sent for duplicates, so the original Notification Log record is never overwritten."
+    },
+    {
+      "parameters": {
+        "jsCode": "const v = $input.first().json;\nconst books = v.books.map((b, i) => ({\n  book_id: 'book-' + (i + 1),\n  title: b.title,\n  status: b.publication_status,\n  publication_date: null,\n  total_copies_sold: b.copies,\n  total_royalty_earned: b.earned,\n  royalty_paid: b.paid,\n  royalty_pending: b.pending,\n  last_royalty_payout_date: b.last_payout || null\n}));\nconst isPublished = (b) => String(b.status || '').trim().toLowerCase().indexOf('published') === 0;\nreturn [{ json: {\n  request_id: v.request_id,\n  triggered_by: v.triggered_by,\n  environment: v.environment,\n  author: { author_id: v.author_id, name: v.author_name, email: v.author_email },\n  bubble_totals: v.bubble_totals,\n  bubble_royalty_status: v.bubble_royalty_status,\n  published_books: books.filter(isPublished),\n  production_books: books.filter((b) => !isPublished(b)),\n  total_books: books.length\n} }];"
+      },
+      "id": "4f4f014b-9da5-433d-8189-ef4e1a5f3a05",
+      "name": "Prepare Royalty Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        240
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Builds one structured object per author and splits books into Published and In Production. Original Bubble values are preserved; nothing is invented. Throws if author or books are missing so the failure branch runs."
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst num = (x) => {\n  if (x === null || x === undefined || x === '') return 0;\n  const n = Number(String(x).replace(/[^0-9.-]/g, ''));\n  return isNaN(n) ? 0 : n;\n};\nconst round2 = (n) => Math.round(n * 100) / 100;\nconst all = d.published_books.concat(d.production_books);\nlet earned = 0;\nlet paid = 0;\nlet pending = 0;\nlet copies = 0;\nlet latest = null;\nall.forEach((b) => {\n  earned += num(b.total_royalty_earned);\n  paid += num(b.royalty_paid);\n  pending += num(b.royalty_pending);\n  if (b.last_royalty_payout_date) {\n    const t = new Date(b.last_royalty_payout_date).getTime();\n    if (!isNaN(t) && (latest === null || t > latest)) latest = t;\n  }\n});\nd.published_books.forEach((b) => {\n  copies += num(b.total_copies_sold);\n});\nreturn [{ json: Object.assign({}, d, {\n  totals: {\n    total_royalty_earned: round2(earned),\n    total_royalty_paid: round2(paid),\n    total_royalty_pending: round2(pending),\n    total_copies_sold: copies,\n    latest_payout_date: latest === null ? null : new Date(latest).toISOString()\n  }\n}) }];"
+      },
+      "id": "56d67f18-67e5-40a9-bc4d-9ac2cf021411",
+      "name": "Calculate Royalty Totals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        240
+      ],
+      "notes": "Sums earned, paid and pending royalty from the Bubble values; copies sold counts published books only; latest payout date is the most recent non-empty payout date."
+    },
+    {
+      "parameters": {
+        "jsCode": "const d = $input.first().json;\nconst DAY = 86400000;\nconst now = Date.now();\nconst pending = d.totals.total_royalty_pending;\nconst bs = String(d.bubble_royalty_status || '').trim().toLowerCase();\nlet status = 'FULLY PAID';\nconst reasons = [];\nif (pending > 0) {\n  status = 'PENDING';\n  if (bs === 'overdue') reasons.push('Marked overdue in BookLeaf records');\n  if (d.totals.latest_payout_date) {\n    const days = (now - new Date(d.totals.latest_payout_date).getTime()) / DAY;\n    if (days > 90) reasons.push('Latest payout was more than 90 days ago');\n  }\n  if (reasons.length) status = 'OVERDUE';\n}\nconst t = new Date(now);\nconst y = t.getUTCFullYear();\nconst qs = Math.floor(t.getUTCMonth() / 3) * 3;\nconst prevQEnd = new Date(Date.UTC(y, qs, 0));\nconst curQEnd = new Date(Date.UTC(y, qs + 3, 0));\nlet due = new Date(prevQEnd.getTime() + 45 * DAY);\nif (now > due.getTime()) due = new Date(curQEnd.getTime() + 45 * DAY);\nconst payout_info = {\n  last_payout_date: d.totals.latest_payout_date ? d.totals.latest_payout_date.slice(0, 10) : null,\n  next_payout_expected_by: due.toISOString().slice(0, 10),\n  minimum_payout_threshold: 1000,\n  pending_below_threshold: pending > 0 && pending < 1000\n};\nconst fmt = (b) => ({\n  title: b.title,\n  copies_sold: b.total_copies_sold,\n  royalty_earned: b.total_royalty_earned,\n  royalty_paid: b.royalty_paid,\n  royalty_pending: b.royalty_pending,\n  last_payout_date: b.last_royalty_payout_date\n});\nreturn [{ json: Object.assign({}, d, {\n  royalty_status: status,\n  status_reasons: reasons,\n  payout_info: payout_info,\n  ai_input: {\n    author_name: d.author.name,\n    royalty_status: status,\n    published_books: d.published_books.map(fmt),\n    books_in_production: d.production_books.map((b) => ({ title: b.title, production_status: b.status })),\n    totals: d.totals,\n    payout_info: payout_info\n  }\n}) }];"
+      },
+      "id": "3528c345-6e38-4486-ab24-1907e04f61c7",
+      "name": "Check Royalty Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2896,
+        240
+      ],
+      "notes": "FULLY PAID when pending is 0. OVERDUE when pending > 0 and the latest payout is over 90 days old, or a published book older than 90 days with pending royalty never had a payout (same 90-day rule as Bubble). Otherwise PENDING. Uses the current date."
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Write the royalty summary email for this author using only the data below. Start with the line \"Subject: Your BookLeaf Royalty Summary\". Do not mention internal status labels. Do not state a specific calendar date for the next payout; describe the quarterly 45-day payout policy instead. If royalty_status is OVERDUE, gently acknowledge the wait and invite the author to contact BookLeaf support, without promising a date.\n\nAuthor royalty data (JSON):\n{{ JSON.stringify($json.ai_input, null, 2) }}",
+        "messages": {
+          "messageValues": [
+            {
+              "message": "You are an experienced author relationship manager at BookLeaf Publishing.\n\nYour task is to generate a personalized, professional, warm, and easy-to-understand royalty summary email for an author.\n\nFollow these rules:\n\n1. Address the author by their first name.\n2. Use a warm and professional tone.\n3. Include every published book with its title, copies sold, royalty earned, royalty paid, and royalty pending.\n4. Clearly show total royalty earned, total royalty paid, and total pending royalty.\n5. Explain pending payouts using BookLeaf's quarterly payout policy.\n6. According to BookLeaf's policy, royalties are paid quarterly within 45 days, subject to a minimum payout threshold of ₹1,000. Amounts below the threshold roll over to the next payout cycle.\n7. If all royalties are paid, acknowledge this positively.\n8. Mention the production status of unpublished books.\n9. Never promise a specific payment date unless supported by the supplied information.\n10. Never invent sales, payout dates, or financial figures.\n11. Do not expose internal system information.\n12. Use Indian Rupees (₹).\n13. Do not mention AI or automation.\n14. Make the email readable with clear headings and bullet points.\n\nThe generated email must include:\n\nSubject: Your BookLeaf Royalty Summary\n\nEmail Body:\n\n- Personalized greeting.\n- Brief introduction.\n- Book-wise royalty summary.\n- Consolidated royalty totals.\n- Pending payment explanation, if applicable.\n- Production updates, if applicable.\n- Positive closing message.\n- BookLeaf Publishing Support Team signature."
+            }
+          ]
+        },
+        "batching": {}
+      },
+      "id": "a2db62ef-5cea-4f32-8f1d-5248448fee71",
+      "name": "OpenAI – Generate Royalty Summary",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        3152,
+        128
+      ],
+      "onError": "continueErrorOutput",
+      "notes": "Generates the royalty email with the OpenAI Chat Model (gpt-4o-mini) from the real Bubble figures only."
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "responsesApiEnabled": false,
+        "options": {
+          "temperature": 0.4,
+          "timeout": 45000,
+          "maxRetries": 1
+        }
+      },
+      "id": "a71b94f7-e2ea-4299-9cee-072d2a9855c3",
+      "name": "OpenAI Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        3232,
+        352
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": null,
+          "name": "Gateway credits",
+          "__aiGatewayManaged": true
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json || {};\nconst ctx = $('Check Royalty Status').first().json;\nconst text = typeof j.text === 'string' ? j.text.trim() : '';\nconst fullName = String(ctx.author.name || '').trim();\nconst firstName = fullName.split(' ')[0].toLowerCase();\nconst lower = text.toLowerCase();\nlet error = '';\nif (j.error) {\n  error = 'OpenAI generation failed: ' + (j.error.message || j.error);\n} else if (!text) {\n  error = 'OpenAI returned an empty summary';\n} else if (text.length < 200) {\n  error = 'OpenAI summary is too short to be valid';\n} else if (firstName && lower.indexOf(firstName) === -1) {\n  error = 'OpenAI summary does not contain the author name';\n} else if (lower.indexOf('subject:') === -1) {\n  error = 'OpenAI summary is missing the subject line';\n} else if (['error:', 'i\\'m sorry', 'i cannot', 'i can\\'t', 'as an ai'].some((p) => lower.indexOf(p) === 0 || lower.indexOf('as an ai') !== -1)) {\n  error = 'OpenAI response looks like an error or refusal message';\n}\nreturn [{ json: {\n  valid: error === '',\n  error_message: error,\n  request_id: ctx.request_id,\n  author_name: fullName,\n  generated_summary: error === '' ? text : ''\n} }];"
+      },
+      "id": "84ec9ebf-f0fc-4ed2-8f85-8ff566f1a373",
+      "name": "Validate AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3552,
+        176
+      ],
+      "notes": "Rejects empty text, text missing the author name or subject line, and text that looks like an error or refusal. The full email body is preserved unchanged."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "165252c6-ddb2-4bd8-a55e-691637ce955b",
+      "name": "AI Response Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        3776,
+        176
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: \"Rejected\", request_id: $json.request_id || \"\", summary: \"\", error_message: ($json.errors || []).join(\"; \"), email_status: \"not_attempted\", email_error: \"\", subject: \"\", email_to: \"\", totals_match: false, completed_at: $now.toISO() }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "4e2ade83-bd45-4711-baca-4b01032b4bf6",
+      "name": "Respond – Invalid Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3664,
+        944
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Check Royalty Status').first().json;\nconst ai = $('Validate AI Response').first().json;\nconst cfg = $('Workflow Config').first().json;\nconst esc = (s) => String(s === null || s === undefined ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst inr = (n) => '₹' + Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });\nconst cell = (v, right, bold) => '<td style=\"padding:10px 12px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#111827;' + (right ? 'text-align:right;' : '') + (bold ? 'font-weight:700;' : '') + '\">' + v + '</td>';\nconst head = (v, right) => '<th style=\"padding:10px 12px;background:#f9fafb;border-bottom:2px solid #e5e7eb;font-size:12px;color:#6b7280;text-transform:uppercase;' + (right ? 'text-align:right;' : 'text-align:left;') + '\">' + v + '</th>';\nconst t = ctx.totals;\nconst p = ctx.payout_info;\nconst books = ctx.published_books.concat(ctx.production_books);\nconst rows = books.map((b) => '<tr>' + cell(esc(b.title) + '<div style=\"color:#6b7280;font-size:12px\">' + esc(b.status) + '</div>') + cell(esc(b.total_copies_sold), true) + cell(inr(b.total_royalty_earned), true) + cell(inr(b.royalty_paid), true) + cell(inr(b.royalty_pending), true) + '</tr>').join('');\nconst body = String(ai.generated_summary || '').replace(/^\\s*subject:[^\\n]*\\n+/i, '');\nconst narrative = esc(body).split('\\n').map((l0) => {\n  let l = l0.trim();\n  if (!l) return '';\n  l = l.replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>');\n  const h = l.match(/^#{1,6}\\s+(.*)$/);\n  if (h) return '<div style=\"font-weight:700;margin:14px 0 4px;color:#111827\">' + h[1] + '</div>';\n  if (/^[-*]\\s+/.test(l)) return '<div style=\"margin-left:12px\">&bull; ' + l.replace(/^[-*]\\s+/, '') + '</div>';\n  return '<div style=\"margin:6px 0\">' + l + '</div>';\n}).join('');\nconst badge = t.total_royalty_pending <= 0 ? ['Paid in full', '#065f46', '#d1fae5'] : (ctx.royalty_status === 'OVERDUE' ? ['Payout delayed', '#991b1b', '#fee2e2'] : ['Payout pending', '#92400e', '#fef3c7']);\nconst last = p.last_payout_date ? esc(p.last_payout_date) : 'No payout recorded yet';\nconst next = t.total_royalty_pending > 0 ? 'Payouts are processed within 45 days of each quarter end (current cycle deadline: ' + esc(p.next_payout_expected_by) + ')' + (p.pending_below_threshold ? '. Your balance is below the ₹1,000 minimum, so it rolls over to the next cycle.' : ', subject to the ₹1,000 minimum payout threshold.') : 'No payout pending';\nconst box = (label, val) => '<td style=\"padding:12px;background:#f9fafb;border-radius:8px;text-align:center\"><div style=\"font-size:12px;color:#6b7280\">' + label + '</div><div style=\"font-size:18px;font-weight:700;color:#111827\">' + val + '</div></td>';\nconst testRecipient = String(cfg.email_test_recipient || '').trim();\nconst testBanner = testRecipient ? '<div style=\"background:#fef3c7;padding:8px 24px;font-size:12px;color:#92400e\">TEST EMAIL - originally addressed to ' + esc(ctx.author.email) + '</div>' : '';\nconst html = '<!DOCTYPE html><html><body style=\"margin:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif\"><div style=\"max-width:640px;margin:0 auto;background:#ffffff\"><div style=\"background:#1f3a5f;padding:24px;color:#ffffff;font-size:20px;font-weight:700\">BookLeaf Publishing</div>' + testBanner + '<div style=\"padding:24px\"><p style=\"font-size:16px;color:#111827\">Hello ' + esc(String(ctx.author.name || '').split(' ')[0]) + ',</p><span style=\"display:inline-block;padding:4px 10px;border-radius:12px;font-size:12px;font-weight:700;color:' + badge[1] + ';background:' + badge[2] + '\">' + badge[0] + '</span><table style=\"width:100%;border-spacing:8px;margin:12px 0\"><tr>' + box('Earned', inr(t.total_royalty_earned)) + box('Paid', inr(t.total_royalty_paid)) + box('Pending', inr(t.total_royalty_pending)) + '</tr></table><table style=\"width:100%;border-collapse:collapse\"><tr>' + head('Book') + head('Copies', true) + head('Earned', true) + head('Paid', true) + head('Pending', true) + '</tr>' + rows + '</table><p style=\"font-size:14px;color:#374151\"><strong>Last payout:</strong> ' + last + '<br><strong>Next payout:</strong> ' + next + '</p><div style=\"font-size:14px;line-height:1.6;color:#374151;border-top:1px solid #e5e7eb;padding-top:16px\">' + narrative + '</div></div><div style=\"padding:16px 24px;background:#f9fafb;font-size:12px;color:#6b7280\">BookLeaf Publishing Support Team</div></div></body></html>';\nconst to = testRecipient || ctx.author.email;\nconst send_email = cfg.email_enabled === true;\nconst from = String(cfg.email_from || '');\nconst config_error = (send_email && (!from || /REPLACE_WITH/i.test(from))) ? 'Sender address (email_from) is not configured in the Workflow Config node' : '';\nreturn [{ json: { request_id: ctx.request_id, subject: 'Your BookLeaf Royalty Summary', html: html, to: to, send_email: send_email, config_error: config_error, generated_summary: ai.generated_summary, author_name: ai.author_name } }];"
+      },
+      "id": "4736764c-768c-42c9-9f68-6102f587e9e9",
+      "name": "Build Email HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        48
+      ],
+      "notes": "Builds the professional HTML email (greeting, totals, book-wise table, last and next payout) around the AI-written summary."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.send_email === true && !$json.config_error }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": true
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "id": "8a8b2a3f-1046-43f8-9058-1c5f9969f427",
+      "name": "Real Email Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.4,
+      "position": [
+        4224,
+        48
+      ],
+      "notes": "Dry-run switch. email_enabled is false in Workflow Config, so no real email is sent until you set it to true."
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Workflow Config').first().json.email_from }}",
+        "toEmail": "={{ $json.to }}",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "c2391216-5bc4-4a6a-95a5-154d6a0aae9b",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        4448,
+        -80
+      ],
+      "webhookId": "6734ae3c-c890-487a-a81d-476e57cfa31a",
+      "onError": "continueErrorOutput",
+      "notes": "Only runs when email_enabled is true. Needs an SMTP credential. If email_test_recipient is set, every email goes to that address instead of the author."
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json || {};\nconst em = $('Build Email HTML').first().json;\nconst ctx = $('Check Royalty Status').first().json;\nconst sd = $getWorkflowStaticData('global');\nsd.requests = sd.requests || {};\nsd.authors = sd.authors || {};\nlet email_status = 'skipped_test_mode';\nlet email_error = '';\nif (em.send_email) {\n  if (em.config_error) { email_status = 'failed'; email_error = em.config_error; }\n  else if (j.error) { email_status = 'failed'; email_error = String((j.error && j.error.message) || j.error).slice(0, 300); }\n  else { email_status = 'sent'; }\n}\nsd.requests[em.request_id] = email_status === 'failed' ? { status: 'failed', ts: Date.now(), reason: 'email_failed' } : { status: 'success', ts: Date.now() };\nif (sd.authors[ctx.author.author_id]) delete sd.authors[ctx.author.author_id];\nconst bt = ctx.bubble_totals || {};\nconst t = ctx.totals;\nconst match = Math.abs((bt.earned || 0) - t.total_royalty_earned) < 0.01 && Math.abs((bt.paid || 0) - t.total_royalty_paid) < 0.01 && Math.abs((bt.pending || 0) - t.total_royalty_pending) < 0.01;\nreturn [{ json: { status: email_status === 'failed' ? 'EmailFailed' : 'Success', request_id: em.request_id, summary: em.generated_summary, error_message: email_error ? 'Email delivery failed: ' + email_error : '', email_status: email_status, email_error: email_error, subject: em.subject, email_to: em.to, totals_match: match, completed_at: new Date().toISOString() } }];"
+      },
+      "id": "1ba8936c-5756-44e6-b6c1-707c3f2be580",
+      "name": "Build Success Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4672,
+        48
+      ],
+      "notes": "Marks the request as done (blocks duplicate sends), works out the email status and builds the JSON returned to Bubble."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "be5f007b-7021-49bb-a537-990a56bbbd05",
+      "name": "Respond – Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        4896,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $input.first().json || {};\nlet rid = '';\nlet aid = '';\ntry { const v = $('Validate Request').first().json; rid = v.request_id; aid = v.author_id; } catch (e) {}\nlet msg = '';\nif (j.error_message) { msg = j.error_message; }\nelse if (j.error) { const e = j.error; msg = typeof e === 'string' ? e : (e.message || e.description || JSON.stringify(e)); if (e && e.node && e.node.name) msg = '[' + e.node.name + '] ' + msg; }\nelse if (j.message) { msg = j.message; }\nelse { msg = 'Royalty summary generation failed'; }\nconst sd = $getWorkflowStaticData('global');\nsd.requests = sd.requests || {};\nsd.authors = sd.authors || {};\nif (rid) sd.requests[rid] = { status: 'failed', ts: Date.now(), reason: msg.slice(0, 200) };\nif (aid && sd.authors[aid]) delete sd.authors[aid];\nreturn [{ json: { status: 'Failed', request_id: rid || '', summary: '', error_message: msg.slice(0, 500), email_status: 'not_attempted', email_error: '', subject: '', email_to: '', totals_match: false, completed_at: new Date().toISOString() } }];"
+      },
+      "id": "0a552025-5563-4645-bbfd-25232f2b4e5b",
+      "name": "Build Failure Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        640
+      ],
+      "notes": "Single entry point for every failure (bad data, OpenAI error, invalid AI text). Releases the duplicate lock so the request can be retried, and builds the error JSON returned to Bubble."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "47444fe4-cd9c-428d-9753-c60003dd1a02",
+      "name": "Respond – Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        4224,
+        640
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook – Receive Request": {
+      "main": [
+        [
+          {
+            "node": "Workflow Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Workflow Config": {
+      "main": [
+        [
+          {
+            "node": "Validate Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Request": {
+      "main": [
+        [
+          {
+            "node": "Request Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Valid?": {
+      "main": [
+        [
+          {
+            "node": "Check Duplicate Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond – Invalid Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Duplicate Request": {
+      "main": [
+        [
+          {
+            "node": "Is Duplicate?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Duplicate?": {
+      "main": [
+        [
+          {
+            "node": "Respond – Duplicate Request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Royalty Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Royalty Data": {
+      "main": [
+        [
+          {
+            "node": "Calculate Royalty Totals",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Royalty Totals": {
+      "main": [
+        [
+          {
+            "node": "Check Royalty Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Royalty Status": {
+      "main": [
+        [
+          {
+            "node": "OpenAI – Generate Royalty Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI – Generate Royalty Summary": {
+      "main": [
+        [
+          {
+            "node": "Validate AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "OpenAI – Generate Royalty Summary",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate AI Response": {
+      "main": [
+        [
+          {
+            "node": "AI Response Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Response Valid?": {
+      "main": [
+        [
+          {
+            "node": "Build Email HTML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Failure Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email HTML": {
+      "main": [
+        [
+          {
+            "node": "Real Email Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Real Email Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [
+          {
+            "node": "Build Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Success Response": {
+      "main": [
+        [
+          {
+            "node": "Respond – Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Failure Response": {
+      "main": [
+        [
+          {
+            "node": "Respond – Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true,
+    "executionTimeout": 100
+  },
+  "versionId": "a031aea5-83dd-4dca-b8bb-2520904d12e1",
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp",
+    "instanceId": "f87d11ae125b941c4027839b3e6de9f8b1785968373bd1e2f29d7774cf40fbca"
+  },
+  "nodeGroups": [
+    {
+      "id": "1bb55f40-be34-4e24-ba77-8c6e6f017bd6",
+      "name": "Validate request",
+      "nodeIds": [
+        "bff6df2f-d00e-41ae-a4d3-e555928d6225",
+        "2032867e-a629-44c4-b0d2-f844fabf2a21",
+        "f9340157-eeca-485c-8594-ae4827066bf6"
+      ],
+      "description": "Holds the Bubble URLs, then checks the incoming call has a JSON body with author, request and admin IDs before anything runs"
+    },
+    {
+      "id": "291f7395-6f3b-4faa-8718-135bd8d7af63",
+      "name": "Prevent duplicates",
+      "nodeIds": [
+        "cdd5bab7-5e1d-413a-8be8-0f5d671163bc",
+        "71503431-3487-4585-bd65-981e80ca5d85"
+      ],
+      "description": "Looks up the request ID in Bubble and n8n memory so the same request never produces a second summary"
+    },
+    {
+      "id": "08802965-2714-4f95-90d7-3e4b88caa359",
+      "name": "Work out royalty status",
+      "nodeIds": [
+        "56d67f18-67e5-40a9-bc4d-9ac2cf021411",
+        "3528c345-6e38-4486-ab24-1907e04f61c7"
+      ],
+      "description": "Totals earned, paid and pending royalty, then labels the author Fully Paid, Pending or Overdue (90-day rule)"
+    },
+    {
+      "id": "ea974e30-a273-4043-9055-755682065cd4",
+      "name": "Check summary quality",
+      "nodeIds": [
+        "84ec9ebf-f0fc-4ed2-8f85-8ff566f1a373",
+        "165252c6-ddb2-4bd8-a55e-691637ce955b"
+      ],
+      "description": "Confirms the generated email is real text, names the author and is not an error before it is sent"
+    }
+  ],
+  "id": "Mcmxu8M98V0G7AFf",
+  "tags": []
+}
